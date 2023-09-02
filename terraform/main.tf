@@ -6,6 +6,7 @@ variable "aws_config_path" {}
 variable "bucket_tag_name" {}
 variable "domain_name" {}
 variable "domain_name_hosted_zone_id" {}
+variable "oac_id" {}
 
 # Configure required Terraform providers and S3 backend for state storage
 terraform {
@@ -109,31 +110,33 @@ resource "aws_acm_certificate" "ssl_certificate" {
   }
 }
 
-# Define ACM certificate validation using Route 53 records
-resource "aws_acm_certificate_validation" "cert_validation" {
-  provider   = aws.northVirginia
-  depends_on = [aws_acm_certificate.ssl_certificate]
-
-  certificate_arn = aws_acm_certificate.ssl_certificate.arn
-
-  # Get the FQDNs of Route 53 validation records for the certificate
-  validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
-}
-
 # Define a local variable for the CloudFront origin ID
 locals {
   s3_origin_id = "myS3Origin"
 }
 
+resource "aws_cloudfront_origin_access_control" "s3_oac" {
+  name = "myS3OAC"
+  description = "OAC for S3"
+  origin_access_control_origin_type = "s3"
+  signing_protocol = "sigv4"
+  signing_behavior = "always"
+}
+
+import {
+  to = aws_cloudfront_origin_access_control.s3_oac
+  id = "EPA8JBO0WI8OI"
+}
+
 # Create an AWS CloudFront distribution
 resource "aws_cloudfront_distribution" "s3_distribution" {
   # Depend on the ACM certificate validation before creating the CloudFront distribution
-  depends_on = [aws_acm_certificate_validation.cert_validation]
+  depends_on = [aws_acm_certificate.ssl_certificate]
 
   # Configure the CloudFront distribution's origin settings
   origin {
     domain_name              = aws_s3_bucket.deploy_bucket.bucket_regional_domain_name
-    origin_access_control_id = aws_cloudfront_origin_access_control.default.id
+    origin_access_control_id = aws_cloudfront_origin_access_control.s3_oac.id
     origin_id                = local.s3_origin_id
   }
 
