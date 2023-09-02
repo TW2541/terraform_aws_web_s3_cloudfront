@@ -5,6 +5,7 @@ variable "aws_credential_path" {}
 variable "aws_config_path" {}
 variable "bucket_tag_name" {}
 variable "domain_name" {}
+variable "domain_name_hosted_zone_id" {}
 
 # Configure required Terraform providers and S3 backend for state storage
 terraform {
@@ -185,3 +186,34 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
   }
 }
 
+# Create an Alias DNS record for the root domain pointing to CloudFront distribution
+resource "aws_route53_record" "alias_cloudfront" {
+  depends_on = [aws_cloudfront_distribution.s3_distribution]
+
+  zone_id = var.domain_name_hosted_zone_id
+  name    = var.domain_name
+  type    = "A"
+
+  # Configure an alias to the CloudFront distribution
+  alias {
+    name                   = aws_cloudfront_distribution.s3_distribution.domain_name
+    zone_id                = aws_cloudfront_distribution.s3_distribution.hosted_zone_id
+    evaluate_target_health = true
+  }
+}
+
+# Create an Alias DNS record for the www subdomain pointing to the root domain's Alias record
+resource "aws_route53_record" "alias_www" {
+  depends_on = [aws_route53_record.alias_cloudfront]
+
+  zone_id = var.domain_name_hosted_zone_id
+  name    = "www.${var.domain_name}"
+  type    = "A"
+
+  # Configure an alias to the root domain's Alias record
+  alias {
+    name                   = aws_route53_record.alias_cloudfront.name
+    zone_id                = var.domain_name_hosted_zone_id
+    evaluate_target_health = true
+  }
+}
