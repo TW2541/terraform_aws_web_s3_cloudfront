@@ -7,6 +7,7 @@ variable "bucket_tag_name" {}
 variable "domain_name" {}
 variable "domain_name_hosted_zone_id" {}
 variable "oac_id" {}
+variable "root_domain_name" {}
 
 # Configure required Terraform providers and S3 backend for state storage
 terraform {
@@ -110,28 +111,51 @@ resource "aws_acm_certificate" "ssl_certificate" {
   }
 }
 
+resource "aws_route53_record" "acm_record" {
+  depends_on = [aws_acm_certificate.ssl_certificate]
+  provider        = aws.northVirginia
+
+  for_each = {
+    for dvo in aws_acm_certificate.ssl_certificate.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  allow_overwrite = true
+  name            = each.value.name
+  records         = [each.value.record]
+  ttl             = 300
+  type            = each.value.type
+  zone_id         = var.domain_name_hosted_zone_id
+}
+
+resource "aws_acm_certificate_validation" "ssl_certificate_validation" {
+  depends_on = [aws_route53_record.acm_record]
+
+  provider        = aws.northVirginia
+  certificate_arn = aws_acm_certificate.ssl_certificate.arn
+  
+}
+
 # Define a local variable for the CloudFront origin ID
 locals {
   s3_origin_id = "myS3Origin"
 }
 
 resource "aws_cloudfront_origin_access_control" "s3_oac" {
-  name = "myS3OAC"
-  description = "OAC for S3"
+  name                              = "myS3OAC"
+  description                       = "OAC for S3"
   origin_access_control_origin_type = "s3"
-  signing_protocol = "sigv4"
-  signing_behavior = "always"
-}
-
-import {
-  to = aws_cloudfront_origin_access_control.s3_oac
-  id = "EPA8JBO0WI8OI"
+  signing_protocol                  = "sigv4"
+  signing_behavior                  = "always"
 }
 
 # Create an AWS CloudFront distribution
 resource "aws_cloudfront_distribution" "s3_distribution" {
   # Depend on the ACM certificate validation before creating the CloudFront distribution
-  depends_on = [aws_acm_certificate.ssl_certificate]
+  depends_on = [aws_acm_certificate_validation.ssl_certificate_validation, aws_cloudfront_origin_access_control.s3_oac]
 
   # Configure the CloudFront distribution's origin settings
   origin {
@@ -147,7 +171,7 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
   default_root_object = "index.html"
 
   # Configure aliases for the CloudFront distribution
-  aliases = ["${var.domain_name}", "www.${var.domain_name}"]
+  aliases = ["${var.domain_name}"]
 
   # Configure default cache behavior
   default_cache_behavior {
@@ -161,8 +185,6 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
 
     viewer_protocol_policy = "redirect-to-https"
     min_ttl                = 0
-    default_ttl            = 3600
-    max_ttl                = 86400
   }
 
   # Configure price class and geo restrictions
@@ -187,6 +209,32 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
     ssl_support_method             = "sni-only"
     minimum_protocol_version       = "TLSv1"
   }
+}
+
+resource "aws_s3_bucket_policy" "allow_access_from_cloudfront" {
+  depends_on = [aws_cloudfront_distribution.s3_distribution]
+
+  bucket = aws_s3_bucket.deploy_bucket.id
+  policy = jsonencode({
+        "Version": "2008-10-17",
+        "Id": "PolicyForCloudFrontPrivateContent",
+        "Statement": [
+            {
+                "Sid": "AllowCloudFrontServicePrincipal",
+                "Effect": "Allow",
+                "Principal": {
+                    "Service": "cloudfront.amazonaws.com"
+                },
+                "Action": "s3:GetObject",
+                "Resource": "${aws_s3_bucket.deploy_bucket.arn}/*",
+                "Condition": {
+                    "StringEquals": {
+                      "AWS:SourceArn": "${aws_cloudfront_distribution.s3_distribution.arn}"
+                    }
+                }
+            }
+        ]
+      })
 }
 
 # Create an Alias DNS record for the root domain pointing to CloudFront distribution
@@ -215,7 +263,7 @@ resource "aws_route53_record" "alias_www" {
 
   # Configure an alias to the root domain's Alias record
   alias {
-    name                   = aws_route53_record.alias_cloudfront.name
+    name                   = var.domain_name
     zone_id                = var.domain_name_hosted_zone_id
     evaluate_target_health = true
   }
